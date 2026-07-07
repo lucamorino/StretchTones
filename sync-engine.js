@@ -131,39 +131,40 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     }
   }
 
-  // --- gentle convergence: nudge playbackRate; bend back into phase instead of cutting ---
-  // Thresholds and polling are deliberately loose. The design tolerates 50-100ms of
-  // drift ACROSS devices, so there is no reason to correct a single device's own
-  // jitter below that. A modern phone's audio clock drifts only a few ms per minute,
-  // so real accumulated drift over the whole ~26-minute loop stays well under a
-  // second — there is no need to react quickly or often.
-  const CHECK_MS = 10000;            // ms between checks
-  const SOFT = 0.070, HARD = 1.0;    // seconds — comfortably above single-device measurement jitter
-  const RATE_CLAMP = 0.02;           // max ±2% routine playbackRate nudge
-
-  // For persistent HARD-level drift, a "vinyl touch" instead of a reseek: like a DJ
-  // nudging a turntable, playbackRate bends away from 1x and eases back over TOUCH_S
-  // seconds — a shaped half-sine so it starts and ends at exactly 1x, i.e. no
-  // discontinuity, ever. Depth scales with how far off we are: barely audible near
-  // the threshold, a real pitch-bend for a bigger gap. A hard reseek (audible cut)
-  // is a last resort, reserved for gaps too large for any plausible bend to close
-  // (e.g. minutes of background throttling after the phone was locked a long time).
-  const TOUCH_S = 1.0;                // duration of one "touch"
-  const TOUCH_MIN_DEV = 0.05, TOUCH_MAX_DEV = 0.5; // playbackRate deviation range (±5%..±50%)
-  const RESEEK_SANITY_S = 6.0;        // beyond this, bending can't plausibly catch up — just cut
-  let overHardStreak = 0;
+  // --- vinyl-touch drift correction: no reseek, no cut ---
+  // Every check measures how far off we are and, if that's above a jitter floor,
+  // bends playbackRate away from 1x and back over a fixed TOUCH_S window — like a DJ
+  // nudging a turntable back into phase rather than a jump-cut. The ramp is a plain
+  // linear up-then-down slope (not a sine): it starts and ends at exactly 1x by
+  // construction, so there's no discontinuity at either boundary regardless of shape.
+  //
+  // The peak rate is derived straight from the definition of "average rate": to erase
+  // `drift` seconds over a TOUCH_S-second window, the audio must advance
+  // (TOUCH_S - drift) seconds of content while TOUCH_S seconds of real time pass, i.e.
+  // avgRate = 1 - drift/TOUCH_S. A symmetric 1→peak→1 ramp has avgRate = (1+peak)/2, so
+  // peak = 1 - 2*drift/TOUCH_S. E.g. arriving 1s late (drift=-1, TOUCH_S=1) gives
+  // peak=3 (ramp from 1x up to 3x and back, covering 2s of file in 1s of real time);
+  // arriving 0.5s early (drift=+0.5) gives peak=0 (ramp down toward a near-stop and
+  // back, covering just 0.5s of file in that same 1s). Peak scales proportionally with
+  // the size of the drift, clamped to a full octave either way (x0.125..x8) as a hard
+  // safety bound — a gap too big to close in one touch is smaller by the next check
+  // and gets picked up then.
+  const CHECK_MS = 10000;              // ms between checks
+  const TOUCH_THRESHOLD = 0.070;       // seconds — below this, do nothing (single-device jitter floor)
+  const TOUCH_S = 1.0;                 // duration of one touch, in real seconds
+  const RATE_MIN = 0.125, RATE_MAX = 8; // hard playbackRate bounds (one octave down / up)
+  const RESEEK_SANITY_S = 20.0;        // beyond this, no plausible touch closes the gap fast enough — just cut
+  let overSanityStreak = 0;
   let touchTimer = null;
   let touching = false;
 
   function vinylTouch(drift) {
     touching = true;
     clearInterval(touchTimer);
-    // average rate deviation needed to close `drift` seconds over TOUCH_S, for a
-    // half-sine bump (whose average is peak * 2/pi over the half period)
-    const needed = Math.abs(drift) * Math.PI / (2 * TOUCH_S);
-    const peak = Math.sign(-drift) * Math.min(Math.max(needed, TOUCH_MIN_DEV), TOUCH_MAX_DEV);
-    logCorrection('touch-start', drift, `peak=${(peak * 100).toFixed(1)}%`);
+    const peak = Math.min(Math.max(1 - 2 * drift / TOUCH_S, RATE_MIN), RATE_MAX);
+    logCorrection('touch-start', drift, `peak=${peak.toFixed(3)}x`);
     const t0 = performance.now();
+    const half = TOUCH_S / 2;
     touchTimer = setInterval(() => {
       const t = (performance.now() - t0) / 1000;
       if (t >= TOUCH_S || audio.paused) {
@@ -173,14 +174,17 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
         logCorrection('touch-end', drift);
         return;
       }
-      audio.playbackRate = 1 + peak * Math.sin(Math.PI * t / TOUCH_S);
+      // linear ramp: 1 -> peak over the first half, peak -> 1 over the second half
+      audio.playbackRate = t < half
+        ? 1 + (peak - 1) * (t / half)
+        : peak + (1 - peak) * ((t - half) / half);
     }, 50);
   }
 
   function startDrift() {
     clearInterval(driftTimer);
     clearInterval(touchTimer);
-    overHardStreak = 0;
+    overSanityStreak = 0;
     touching = false;
     if (noSync) return; // diagnostic: seek once at tap, then leave it alone entirely
     driftTimer = setInterval(() => {
@@ -190,30 +194,25 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
       if (drift >  D / 2) drift -= D;                    // choose nearest across the loop seam
       if (drift < -D / 2) drift += D;
 
-      if (Math.abs(drift) > HARD) {
-        // require two consecutive over-threshold reads before acting — filters
-        // one-off measurement glitches (e.g. a check landing right on the loop seam)
-        if (++overHardStreak >= 2) {
-          overHardStreak = 0;
-          if (Math.abs(drift) > RESEEK_SANITY_S) {
-            logCorrection('reseek', drift);
-            audio.currentTime = targetPos();
-            audio.playbackRate = 1;
-          } else {
-            vinylTouch(drift);
-          }
-        }
-      } else {
-        overHardStreak = 0;
-        const wasNudging = audio.playbackRate !== 1;
-        if (Math.abs(drift) > SOFT) {
-          audio.playbackRate = 1 - Math.max(-RATE_CLAMP, Math.min(RATE_CLAMP, drift));
-          logCorrection('soft-nudge', drift, `rate=${audio.playbackRate.toFixed(4)}`);
-        } else {
-          audio.playbackRate = 1;
-          if (wasNudging) logCorrection('soft-release', drift);
-        }
+      if (Math.abs(drift) < TOUCH_THRESHOLD) {
+        overSanityStreak = 0;
+        return; // within single-device jitter — nothing to correct
       }
+
+      if (Math.abs(drift) > RESEEK_SANITY_S) {
+        // require two consecutive over-threshold reads before an audible cut — filters
+        // one-off measurement glitches (e.g. a check landing right on the loop seam)
+        if (++overSanityStreak >= 2) {
+          overSanityStreak = 0;
+          logCorrection('reseek', drift);
+          audio.currentTime = targetPos();
+          audio.playbackRate = 1;
+        }
+        return;
+      }
+
+      overSanityStreak = 0;
+      vinylTouch(drift);
     }, CHECK_MS);
     // (this loop is throttled while backgrounded — it re-converges on return to foreground)
   }
