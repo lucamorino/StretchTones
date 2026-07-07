@@ -25,18 +25,21 @@
   import { createPlayer } from './sync-engine.js';
 
   // one stereo file per phone/channel — no splitting needed, these are already per-channel mixes
+  // AAC/m4a, ~25MB each (down from 62MB MP3s) — smaller payload buffers fully before
+  // a locked phone throttles background fetches, which is what was causing playback
+  // interruptions with the old files
   const CHANNELS = [
-    'public/assets/stem/Tones- 1-stretch-2.mp3',
-    'public/assets/stem/Tones- 2-stretch-2.mp3',
-    'public/assets/stem/Tones- 3-stretch-3.mp3',
-    'public/assets/stem/Tones- 4-stretch-4.mp3',
-    'public/assets/stem/Tones- 5-stretch-5.mp3',
-    'public/assets/stem/Tones- 6-stretch-6.mp3',
-    'public/assets/stem/Tones- 7-stretch-7.mp3',
+    'public/assets/StretchTones_Tracks/Track1.m4a',
+    'public/assets/StretchTones_Tracks/Track2.m4a',
+    'public/assets/StretchTones_Tracks/Track3.m4a',
+    'public/assets/StretchTones_Tracks/Track4.m4a',
+    'public/assets/StretchTones_Tracks/Track5.m4a',
+    'public/assets/StretchTones_Tracks/Track6.m4a',
+    'public/assets/StretchTones_Tracks/Track7.m4a',
   ];
 
-  // exact PCM sample count / sample rate (71794944 / 44100) — container-reported duration is off by ~40us
-  const DURATION = 1628.0032653061225;
+  // exact PCM sample count / sample rate (70220736 / 44100) — container-reported duration is off by ~48ms
+  const DURATION = 1592.3069387755102;
 
   const player = createPlayer({
     channels: CHANNELS,
@@ -55,8 +58,19 @@
 
   btn.addEventListener('click', () => { player.toggle(); paint(); });
 
-  player.audio.addEventListener('waiting', () => loader.classList.add('show'));
-  player.audio.addEventListener('canplay',  () => loader.classList.remove('show'));
-  player.audio.addEventListener('playing',  () => { loader.classList.remove('show'); paint(); });
+  // the loader stays lit until the file is FULLY buffered, not just "enough to play through" —
+  // full buffering is the point at which lock-screen playback stops depending on the network
+  function fullyBuffered() {
+    const b = player.audio.buffered;
+    return b.length > 0 && b.end(b.length - 1) >= DURATION - 0.25;
+  }
+  function refreshLoader() {
+    loader.classList.toggle('show', !fullyBuffered());
+  }
+
+  player.audio.addEventListener('progress', refreshLoader);
+  player.audio.addEventListener('waiting',  () => loader.classList.add('show'));
+  player.audio.addEventListener('playing',  () => { refreshLoader(); paint(); });
   player.audio.addEventListener('pause',    () => paint());
+  refreshLoader();
 </script>

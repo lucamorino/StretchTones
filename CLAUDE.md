@@ -54,22 +54,45 @@ a URL, tap a single play button, and pocket the phone.
 
 ## Audio files
 
-- Delivered as **7 separate stereo files** (`public/assets/stem/Tones- N-stretch-N.mp3`),
-  one per channel — already split, not one packed multichannel file. Each phone
-  gets a full stereo mix for its channel (headphone-style), not a mono spatial slice.
+- Delivered as **7 separate stereo AAC/m4a files**
+  (`public/assets/StretchTones_Tracks/Track{1..7}.m4a`), one per channel —
+  already split, not one packed multichannel file. Each phone gets a full
+  stereo mix for its channel (headphone-style), not a mono spatial slice.
 - **RESOLVED — stereo vs. mono:** confirmed stereo (2ch, 44.1kHz) via `ffprobe`.
-- **RESOLVED — exact loop length:** the container/format duration (`ffprobe
-  format=duration`) reads **1628.003225s**, but is *not* trustworthy per the gotcha
-  above. Decoding full PCM and counting samples (`71794944 samples / 44100 Hz`)
-  gives the true value used as the `duration` constant in `index.html`:
-  **1628.0032653061225s**. All 7 files decode to the identical sample count, so
-  they are already loop-aligned.
-- **Known risk, not yet addressed:** these are LAME-encoded MP3s. Browser MP3
-  decoders don't uniformly honor gapless (LAME delay/padding) tags — Safari in
-  particular can leave a small click/gap at the loop seam despite `loop=true`
-  looping at the *sample-accurate* point ffmpeg reports. Worth a real-device
-  listening test before the run; re-encoding to AAC/M4A is the fallback if it's
-  audible.
+- **RESOLVED — exact loop length:** container/format duration
+  (`ffprobe format=duration`) reads **1592.354830s**, but is *not* trustworthy
+  per the gotcha above (~48ms off here). Decoding full PCM and counting samples
+  (`70220736 samples / 44100 Hz`) gives the true value used as the `duration`
+  constant in `index.html`: **1592.3069387755102s**. All 7 files decode to the
+  identical sample count, so they are already loop-aligned.
+- **Superseded — original MP3 stems:** the project originally shipped as
+  `public/assets/stem/Tones- N-stretch-N.mp3` (62MB each, 1628.0032653061225s
+  loop). Replaced 2026-07-07 with the smaller AAC set above after real-device
+  testing (iPhone, Chrome) showed continuous playback interruptions — diagnosed
+  as buffering not completing before the phone locked and background fetches
+  got throttled (see next section). The old `stem/` folder is still on disk but
+  unreferenced; safe to delete once the AAC set is confirmed good on-device.
+  AAC also carries gapless (iTunSMPB) metadata that mobile decoders honor more
+  reliably than the old files' LAME MP3 padding, which was a separate,
+  previously-flagged loop-seam-click risk.
+
+## Buffering-before-lock (root cause of the interruption bug)
+
+- The phase-lock design seeks `currentTime` to an arbitrary mid-file position
+  immediately on tap, then expects `loop=true` to run with no further network
+  dependency. That promise only holds once the *entire* file is buffered —
+  and on iOS, backgrounded/locked tabs get their network fetches throttled, so
+  if the file isn't fully downloaded by the time the visitor pockets the phone,
+  playback stalls until the next foreground moment.
+- `index.html` now tracks this directly: the loader
+  (`public/images/loader.gif`) stays visible until `audio.buffered` covers the
+  full `duration`, not just until `canplaythrough` (which only means "enough
+  buffered to play right now," not "safe to lock"). This is a UI signal only —
+  it doesn't block playback, which still starts immediately on tap per the
+  phase-lock design.
+- Smaller files (AAC vs. the old MP3s) matter because they shrink the window
+  between tap and full-buffer completion, directly reducing how often a visitor
+  locks the phone before that point.
 
 ## Gotchas to respect
 
@@ -91,14 +114,16 @@ a URL, tap a single play button, and pocket the phone.
   randomized per [[Channel assignment]] above.
 - `index.html` is the minimal front end: a black page with a single play/pause
   button (`public/images/play.png` / `stop.png`, swapped on state) in the
-  top-left corner, plus `public/images/loader.gif` shown while buffering. It
-  imports `createPlayer` from `sync-engine.js` with the 7 local channel paths
-  and the exact `duration` constant above. `player.html` (an earlier Icecast/
-  manual-channel-switcher mockup, architecturally incompatible with the settled
-  design) has been removed in favor of this.
-- Note: the 7 stems are 62MB each (435MB total, ~305kbps stereo) — comfortably
-  under GitHub's 100MB hard per-file limit but past the 50MB soft-warning
-  threshold; consider Git LFS if that warning becomes a nuisance.
+  top-left corner, plus `public/images/loader.gif` shown until the file is
+  fully buffered (see Buffering-before-lock above). It imports `createPlayer`
+  from `sync-engine.js` with the 7 local channel paths and the exact `duration`
+  constant above. `player.html` (an earlier Icecast/manual-channel-switcher
+  mockup, architecturally incompatible with the settled design) has been
+  removed in favor of this.
+- Note: the current AAC files are ~25MB each (175MB total). The superseded MP3
+  stems were 62MB each (435MB total) — well under GitHub's 100MB hard per-file
+  limit either way, but consider Git LFS if the 50MB soft-warning threshold
+  becomes a nuisance.
 - TODO:
   1. ~~Confirm stereo-vs-mono and exact loop length.~~ Done — see Audio files.
   2. ~~Provide the `ffmpeg` split command.~~ Not needed — files arrived pre-split.
