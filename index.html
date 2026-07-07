@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stretch Tones</title>
+<link rel="icon" href="public/favicon.ico">
+<style>
+  html, body { margin:0; height:100%; background:#000; }
+  button#playBtn {
+    position:fixed; top:calc(20px + env(safe-area-inset-top)); left:20px;
+    width:64px; height:64px; padding:0; border:0; background:none; cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+  }
+  button#playBtn img { width:100%; height:100%; display:block; }
+  #loader {
+    position:fixed; top:calc(28px + env(safe-area-inset-top)); left:96px;
+    width:32px; height:32px; display:none;
+  }
+  #loader.show { display:block; }
+</style>
+
+<button id="playBtn" aria-label="Play"><img id="playIcon" src="public/images/play.png" alt=""></button>
+<img id="loader" src="public/images/loader.gif" alt="">
+
+<script type="module">
+  import { createPlayer } from './sync-engine.js';
+
+  // one stereo file per phone/channel — no splitting needed, these are already per-channel mixes
+  const CHANNELS = [
+    'public/assets/stem/Tones- 1-stretch-2.mp3',
+    'public/assets/stem/Tones- 2-stretch-2.mp3',
+    'public/assets/stem/Tones- 3-stretch-3.mp3',
+    'public/assets/stem/Tones- 4-stretch-4.mp3',
+    'public/assets/stem/Tones- 5-stretch-5.mp3',
+    'public/assets/stem/Tones- 6-stretch-6.mp3',
+    'public/assets/stem/Tones- 7-stretch-7.mp3',
+  ];
+
+  // exact PCM sample count / sample rate (71794944 / 44100) — container-reported duration is off by ~40us
+  const DURATION = 1628.0032653061225;
+
+  const player = createPlayer({
+    channels: CHANNELS,
+    duration: DURATION,
+    title: 'Stretch Tones',
+  });
+
+  const btn = document.getElementById('playBtn');
+  const icon = document.getElementById('playIcon');
+  const loader = document.getElementById('loader');
+
+  function paint() {
+    icon.src = player.playing ? 'public/images/stop.png' : 'public/images/play.png';
+    btn.setAttribute('aria-label', player.playing ? 'Pause' : 'Play');
+  }
+
+  btn.addEventListener('click', () => { player.toggle(); paint(); });
+
+  player.audio.addEventListener('waiting', () => loader.classList.add('show'));
+  player.audio.addEventListener('canplay',  () => loader.classList.remove('show'));
+  player.audio.addEventListener('playing',  () => { loader.classList.remove('show'); paint(); });
+  player.audio.addEventListener('pause',    () => paint());
+</script>
