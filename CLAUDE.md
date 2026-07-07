@@ -157,8 +157,55 @@ a URL, tap a single play button, and pocket the phone.
   scenario for e.g. minutes of background-throttled JS after a long lock), so
   it isn't worth trying — a rare, expected cut in an edge case that shouldn't
   come up during normal listening.
-- Not yet confirmed on a real locked iPhone as of 2026-07-07 — this is the
-  next thing to test.
+- **Update 2026-07-07: vinyl touch shipped, short discontinuities are still
+  audible (occasional, brief) on a real iPhone.** Not yet root-caused — see
+  next section for the live diagnostic tooling added to actually find out,
+  rather than continuing to guess-and-patch blind.
+
+## Diagnosing the remaining short discontinuities (open, 2026-07-07)
+
+Three live candidates, in order of suspicion:
+1. A real bug still causing `vinylTouch()` or the reseek to fire more than
+   intended — the drift/wraparound math has been re-checked and looks sound,
+   but hasn't been proven against real device logs yet.
+2. **iOS may treat *any* `audio.playbackRate` assignment as a small click,
+   regardless of magnitude.** If true, `vinylTouch()`'s ~20 rate updates over
+   its 1s ramp (every 50ms) could each be an audible tick rather than one
+   smooth bend — and the routine "soft nudge" (every 10s, whenever drift
+   crosses 70ms) would click too, independent of any touch/reseek. This would
+   read exactly as "short, scattered" discontinuities.
+3. Something outside the sync code entirely — a real decoder/audio-pipeline
+   hiccup (memory pressure from holding a ~25MB decoded Blob, iOS power
+   management, etc.) unrelated to any correction logic.
+
+`sync-engine.js` now has two query-param diagnostics to tell these apart on a
+real device, using Safari's remote Web Inspector (connect the iPhone to a Mac
+via cable, then Safari > Develop > [device name] > this page, to see the
+console live):
+- **`?synclog=1`** — logs every correction (`soft-nudge`, `soft-release`,
+  `touch-start`, `touch-end`, `reseek`) to the console with a timestamp and
+  the measured drift. Correlate a heard click against the log: if a click
+  lines up with a logged event, it's one of our corrections (candidate 1 or
+  2); if clicks happen with *no* corresponding log line, it's candidate 3.
+- **`?nosync=1`** — seeks once at tap, then disables the entire correction
+  loop (no soft nudge, no touch, no reseek, for the rest of that session).
+  Listen for a few minutes: if discontinuities persist with zero correction
+  code running at all, the sync mechanism is conclusively ruled out, and the
+  investigation moves to candidate 3 (native playback pipeline). If they stop,
+  the fix is in narrowing candidate 1 vs. 2 using the `synclog` output.
+- Combine as `?ch=1&synclog=1` or `?ch=1&nosync=1` etc.
+
+## Note: pre-buffering loader can appear to vanish during repeat testing
+
+`fetchWholeFile()` uses `cache: 'force-cache'`, so after the first real
+download the file sits in the browser's HTTP cache. Reloading the *same*
+page on the *same* device (exactly what iterative testing does) then resolves
+`fetch()` almost instantly from cache, so the loader/percentage UI in
+`index.html` flashes for a few ms or less — not because it was removed, but
+because there's genuinely nothing to wait for anymore. A first-time visitor
+at the actual installation (cold cache) will still see it. To exercise the
+loader UI for real during testing, add **`?nocache=1`** to force a fresh
+network download every time.
 
 ## Gotchas to respect
 

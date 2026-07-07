@@ -35,10 +35,27 @@
 
 export function createPlayer({ channels, duration = null, timeUrl = null, title = 'Installation', onProgress = null }) {
   // --- pick this visitor's channel from ?ch=N (1-based); bare link falls back to random ---
-  const chParam = new URLSearchParams(location.search).get('ch');
+  const params = new URLSearchParams(location.search);
+  const chParam = params.get('ch');
   const n = chParam ? Math.min(Math.max(parseInt(chParam, 10), 1), channels.length)
                      : 1 + Math.floor(Math.random() * channels.length);
   const url = channels[n - 1];
+
+  // diagnostic escape hatches for isolating the cause of playback interruptions:
+  //   ?nosync=1   — seek once at tap, then NO further correction at all (tests whether
+  //                 corrections are the cause, or the glitches happen independent of them)
+  //   ?synclog=1  — console.debug every correction with a timestamp, for correlating
+  //                 against what you hear (open Safari's remote Web Inspector: connect
+  //                 the iPhone to a Mac, then Safari > Develop > [device] > this page)
+  //   ?nocache=1  — bypass the HTTP cache and force a real fresh download, so the
+  //                 progress UI is exercised for real instead of resolving instantly
+  //                 from a previous test's cached response
+  const noSync = params.has('nosync');
+  const syncLog = params.has('synclog');
+  const noCache = params.has('nocache');
+  function logCorrection(type, drift, extra = '') {
+    if (syncLog) console.debug(`[sync] ${new Date().toISOString()} ${type} drift=${drift.toFixed(3)}s ${extra}`);
+  }
 
   const audio = new Audio();
   audio.loop = true;                 // loop locally — no network during playback
@@ -51,7 +68,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
   async function fetchWholeFile() {
     for (;;) {
       try {
-        const res = await fetch(url, { cache: 'force-cache' });
+        const res = await fetch(url, { cache: noCache ? 'no-store' : 'force-cache' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const total = Number(res.headers.get('content-length')) || 0;
         const declaredType = res.headers.get('content-type') || '';
@@ -145,6 +162,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     // half-sine bump (whose average is peak * 2/pi over the half period)
     const needed = Math.abs(drift) * Math.PI / (2 * TOUCH_S);
     const peak = Math.sign(-drift) * Math.min(Math.max(needed, TOUCH_MIN_DEV), TOUCH_MAX_DEV);
+    logCorrection('touch-start', drift, `peak=${(peak * 100).toFixed(1)}%`);
     const t0 = performance.now();
     touchTimer = setInterval(() => {
       const t = (performance.now() - t0) / 1000;
@@ -152,6 +170,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
         audio.playbackRate = 1;
         touching = false;
         clearInterval(touchTimer);
+        logCorrection('touch-end', drift);
         return;
       }
       audio.playbackRate = 1 + peak * Math.sin(Math.PI * t / TOUCH_S);
@@ -163,6 +182,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     clearInterval(touchTimer);
     overHardStreak = 0;
     touching = false;
+    if (noSync) return; // diagnostic: seek once at tap, then leave it alone entirely
     driftTimer = setInterval(() => {
       if (audio.paused || !loopLen() || touching) return;
       const D = loopLen();
@@ -175,14 +195,24 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
         // one-off measurement glitches (e.g. a check landing right on the loop seam)
         if (++overHardStreak >= 2) {
           overHardStreak = 0;
-          if (Math.abs(drift) > RESEEK_SANITY_S) { audio.currentTime = targetPos(); audio.playbackRate = 1; }
-          else vinylTouch(drift);
+          if (Math.abs(drift) > RESEEK_SANITY_S) {
+            logCorrection('reseek', drift);
+            audio.currentTime = targetPos();
+            audio.playbackRate = 1;
+          } else {
+            vinylTouch(drift);
+          }
         }
       } else {
         overHardStreak = 0;
-        audio.playbackRate = Math.abs(drift) > SOFT
-          ? 1 - Math.max(-RATE_CLAMP, Math.min(RATE_CLAMP, drift))
-          : 1;
+        const wasNudging = audio.playbackRate !== 1;
+        if (Math.abs(drift) > SOFT) {
+          audio.playbackRate = 1 - Math.max(-RATE_CLAMP, Math.min(RATE_CLAMP, drift));
+          logCorrection('soft-nudge', drift, `rate=${audio.playbackRate.toFixed(4)}`);
+        } else {
+          audio.playbackRate = 1;
+          if (wasNudging) logCorrection('soft-release', drift);
+        }
       }
     }, CHECK_MS);
     // (this loop is throttled while backgrounded — it re-converges on return to foreground)
