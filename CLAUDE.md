@@ -78,21 +78,34 @@ a URL, tap a single play button, and pocket the phone.
 
 ## Buffering-before-lock (root cause of the interruption bug)
 
-- The phase-lock design seeks `currentTime` to an arbitrary mid-file position
-  immediately on tap, then expects `loop=true` to run with no further network
-  dependency. That promise only holds once the *entire* file is buffered —
-  and on iOS, backgrounded/locked tabs get their network fetches throttled, so
-  if the file isn't fully downloaded by the time the visitor pockets the phone,
-  playback stalls until the next foreground moment.
-- `index.html` now tracks this directly: the loader
-  (`public/images/loader.gif`) stays visible until `audio.buffered` covers the
-  full `duration`, not just until `canplaythrough` (which only means "enough
-  buffered to play right now," not "safe to lock"). This is a UI signal only —
-  it doesn't block playback, which still starts immediately on tap per the
-  phase-lock design.
-- Smaller files (AAC vs. the old MP3s) matter because they shrink the window
-  between tap and full-buffer completion, directly reducing how often a visitor
-  locks the phone before that point.
+- **First attempt (insufficient):** relied on `audio.preload = 'auto'` to
+  download in the background, gating a "safe to lock" loader on
+  `audio.buffered` covering the full duration. Smaller AAC files (this section
+  originally recommended the switch) reduced but did not eliminate real-device
+  interruptions on iPhone.
+- **Root cause:** iOS WebKit (every iOS browser, Chrome included, runs on
+  WebKit) does not reliably honor `preload="auto"` — it can defer the actual
+  download until close to a user gesture. So "buffered enough by the time the
+  phone locks" was never guaranteed in the first place. Once locked, background
+  media fetches get throttled hard, so a still-downloading tail stalls
+  repeatedly. This is orthogonal to file size — it's a scheduling problem, not
+  a bandwidth problem.
+- **Current fix, in `sync-engine.js`:** the whole file is downloaded with a
+  plain `fetch()` into an in-memory `Blob` *before* the play button is ever
+  enabled — a plain `fetch()` is not subject to WebKit's media-preload
+  throttling. `audio.src` is only ever set to the resulting `URL.createObjectURL(blob)`,
+  never to the network URL directly. Once that resolves there is categorically
+  zero remaining network dependency: not "probably buffered," but nothing left
+  to fetch, ever, including across the loop seam. `player.ready` /
+  `player.whenReady` gate playback; `index.html` disables the button and shows
+  live download percentage (`onProgress`) until then. Fetch failures retry
+  automatically every 3s (gallery wifi can be flaky).
+- Trade-off: the visitor now waits for a full download before they can tap
+  play, rather than tapping immediately and hoping buffering keeps up. For a
+  ~25MB AAC file on gallery wifi this should be a few seconds — an acceptable
+  cost for a guarantee instead of a probabilistic race.
+- Still worth testing on a real locked iPhone: this removes the buffering race
+  entirely, but hasn't yet been confirmed on-device as of 2026-07-07.
 
 ## Gotchas to respect
 

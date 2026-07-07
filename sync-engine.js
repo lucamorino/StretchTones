@@ -9,6 +9,17 @@
   SEEK (currentTime), so realistic cross-device sync is ~20–50 ms, not
   sample-accurate. That is the deliberate trade for background playback.
 
+  WHY fetch() TO A Blob INSTEAD OF audio.src = url DIRECTLY: iOS WebKit
+  (every iOS browser, Chrome included, runs on WebKit) does not reliably
+  honor preload="auto" — it can defer the actual download until close to
+  a user gesture, so "buffered enough by the time the phone locks" is not
+  guaranteed. Once locked, background media fetches get throttled hard,
+  so a still-downloading tail stalls repeatedly. A plain fetch() is not
+  subject to that media-preload throttling, and once the bytes are a
+  Blob there is zero remaining network dependency — not "probably
+  buffered," but nothing left to fetch, ever, including across the loop
+  seam. play() is gated until the fetch resolves (see `ready`/`onProgress`).
+
   WIRING (your existing button):
       import { createPlayer } from './sync-engine.js';
       const player = createPlayer({
@@ -16,12 +27,13 @@
         duration: 612.0,                       // EXACT loop length in seconds
         timeUrl:  'https://audio.you.org/time', // omit to trust device clocks
         title:    'Installation Title',
+        onProgress: frac => { ... },           // 0..1 download progress
       });
       document.getElementById('playBtn')
-              .addEventListener('click', () => player.toggle());
+              .addEventListener('click', () => player.toggle()); // no-ops until player.ready
 */
 
-export function createPlayer({ channels, duration = null, timeUrl = null, title = 'Installation' }) {
+export function createPlayer({ channels, duration = null, timeUrl = null, title = 'Installation', onProgress = null }) {
   // --- pick this visitor's channel from ?ch=N (1-based); bare link falls back to random ---
   const chParam = new URLSearchParams(location.search).get('ch');
   const n = chParam ? Math.min(Math.max(parseInt(chParam, 10), 1), channels.length)
@@ -29,11 +41,52 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
   const url = channels[n - 1];
 
   const audio = new Audio();
-  audio.src = url;
   audio.loop = true;                 // loop locally — no network during playback
-  audio.preload = 'auto';            // fully buffer so seeking + locked playback are solid
   audio.setAttribute('playsinline', ''); // iOS: never go fullscreen
   // NOTE: do NOT set crossOrigin — plain playback across origins needs no CORS.
+
+  let ready = false;
+
+  // --- download the whole file into memory before it ever touches <audio>, retrying on failure ---
+  async function fetchWholeFile() {
+    for (;;) {
+      try {
+        const res = await fetch(url, { cache: 'force-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const total = Number(res.headers.get('content-length')) || 0;
+        const declaredType = res.headers.get('content-type') || '';
+        // a Blob's declared type is what <audio> uses to decide it can play it —
+        // fall back to audio/mp4 if the host mis-declares .m4a (e.g. octet-stream)
+        const type = declaredType.startsWith('audio/') ? declaredType : 'audio/mp4';
+
+        let blob;
+        if (res.body && res.body.getReader) {
+          const reader = res.body.getReader();
+          const chunks = [];
+          let received = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            if (onProgress) onProgress(total ? received / total : 0);
+          }
+          blob = new Blob(chunks, { type });
+        } else {
+          blob = await res.blob(); // fallback: no fine-grained progress
+        }
+
+        audio.src = URL.createObjectURL(blob);
+        ready = true;
+        if (onProgress) onProgress(1);
+        return;
+      } catch {
+        if (onProgress) onProgress(0); // signal "still not ready" and try again
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  }
+  const readyPromise = fetchWholeFile();
 
   const ANCHOR_MS = 0;               // loop phase-locked to the Unix epoch
   let clockOffset = 0;               // serverTime - clientTime, in ms
@@ -88,6 +141,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
   }
 
   function play() {
+    if (!ready) return; // whole file must be a local Blob first — see fetchWholeFile
     // MUST run synchronously inside the user gesture on iOS. Clock is already
     // synced (on load + periodically), so we can seek and play immediately.
     audio.currentTime = targetPos();
@@ -105,6 +159,8 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     play,
     pause: () => audio.pause(),
     get playing() { return !audio.paused; },
+    get ready() { return ready; },
+    whenReady: readyPromise,
     audio,   // exposed if you want to reflect state on your button
   };
 }
