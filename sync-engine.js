@@ -114,20 +114,45 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     }
   }
 
-  // --- gentle convergence: nudge playbackRate, hard re-seek only on big gaps ---
-  const SOFT = 0.030, HARD = 0.250;  // seconds
+  // --- gentle convergence: nudge playbackRate, hard re-seek only on big, PERSISTENT gaps ---
+  // Thresholds and polling are deliberately loose. The design tolerates 50-100ms of
+  // drift ACROSS devices, so there is no reason to correct a single device's own
+  // jitter below that. A tight 2s/30ms/250ms setup was the actual cause of audible
+  // interruptions: audio.currentTime reads carry tens of ms of JS-timer scheduling
+  // jitter on mobile, which alone was crossing those thresholds on nearly every
+  // tick — triggering a playbackRate change or hard reseek (both audible on iOS)
+  // even with zero real clock drift. A modern phone's audio clock drifts only a
+  // few ms per minute, so real drift over the whole ~26-minute loop stays well
+  // under a second — there is no need to react quickly or often.
+  const CHECK_MS = 10000;            // ms between checks
+  const SOFT = 0.070, HARD = 1.0;    // seconds — comfortably above single-device measurement jitter
+  const RATE_CLAMP = 0.02;           // max ±2% playbackRate nudge
+  let overHardStreak = 0;
   function startDrift() {
     clearInterval(driftTimer);
+    overHardStreak = 0;
     driftTimer = setInterval(() => {
       if (audio.paused || !loopLen()) return;
       const D = loopLen();
       let drift = audio.currentTime - targetPos();      // + means we are ahead
       if (drift >  D / 2) drift -= D;                    // choose nearest across the loop seam
       if (drift < -D / 2) drift += D;
-      if (Math.abs(drift) > HARD)      { audio.currentTime = targetPos(); audio.playbackRate = 1; }
-      else if (Math.abs(drift) > SOFT) { audio.playbackRate = 1 - Math.max(-0.03, Math.min(0.03, drift)); }
-      else                             { audio.playbackRate = 1; }
-    }, 2000);
+
+      if (Math.abs(drift) > HARD) {
+        // require two consecutive over-threshold reads before reseeking — filters
+        // one-off measurement glitches (e.g. a check landing right on the loop seam)
+        if (++overHardStreak >= 2) {
+          audio.currentTime = targetPos();
+          audio.playbackRate = 1;
+          overHardStreak = 0;
+        }
+      } else {
+        overHardStreak = 0;
+        audio.playbackRate = Math.abs(drift) > SOFT
+          ? 1 - Math.max(-RATE_CLAMP, Math.min(RATE_CLAMP, drift))
+          : 1;
+      }
+    }, CHECK_MS);
     // (this loop is throttled while backgrounded — it re-converges on return to foreground)
   }
 

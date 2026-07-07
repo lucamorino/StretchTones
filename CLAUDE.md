@@ -104,8 +104,36 @@ a URL, tap a single play button, and pocket the phone.
   play, rather than tapping immediately and hoping buffering keeps up. For a
   ~25MB AAC file on gallery wifi this should be a few seconds — an acceptable
   cost for a guarantee instead of a probabilistic race.
-- Still worth testing on a real locked iPhone: this removes the buffering race
-  entirely, but hasn't yet been confirmed on-device as of 2026-07-07.
+- **Update 2026-07-07: full pre-buffering shipped, interruptions persisted.**
+  This ruled out buffering/network as the cause entirely and pointed at the
+  drift-correction loop itself — see next section.
+
+## Drift-correction loop was the actual interruption source
+
+- **Root cause:** `startDrift()` polled every **2s** and would hard-reseek
+  (`audio.currentTime = targetPos()`) past **250ms** of measured drift, or
+  nudge `playbackRate` past just **30ms**. But `audio.currentTime` reads carry
+  real measurement jitter from JS timer scheduling on mobile — commonly tens
+  of ms, more under load — which alone was enough to cross a 30ms threshold on
+  nearly every single tick, with zero real clock drift involved. Every such
+  crossing changed `playbackRate` or hard-reseeked, and both are known to
+  produce an audible pop/glitch on iOS Safari's `<audio>` pipeline. Polling
+  every 2s made this effectively continuous.
+- **Why the thresholds were wrong in the first place:** the hard requirement
+  is 50-100ms tolerance *across devices*. There is no reason to correct a
+  single device's own sub-100ms jitter at all. A phone's audio clock drifts
+  only a few ms per minute, so real accumulated drift over the entire
+  ~26-minute loop stays well under a second — nothing here needs fast or
+  frequent reaction.
+- **Fix, in `sync-engine.js`:** poll interval raised to 10s; `SOFT` (start
+  nudging `playbackRate`) raised to 70ms; `HARD` (reseek) raised to 1s; a hard
+  reseek now requires **two consecutive** over-threshold reads before firing,
+  to filter one-off measurement glitches (e.g. a check landing right on the
+  loop seam) rather than reacting to a single noisy sample. Net effect:
+  corrections should now fire rarely if ever during normal playback, instead
+  of on nearly every 2s tick.
+- Not yet confirmed on a real locked iPhone as of 2026-07-07 — this is the
+  next thing to test.
 
 ## Gotchas to respect
 
