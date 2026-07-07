@@ -228,7 +228,8 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     // synced (on load + periodically), so we can seek and play immediately.
     audio.currentTime = targetPos();
     audio.play().catch(() => {/* autoplay refused until a real tap */});
-    startDrift();
+    // startDrift();  // DISABLED for testing — isolating whether drift correction is
+                       // the source of the ~0.5-3s interruptions. Re-enable once ruled out.
     setMediaSession();
   }
 
