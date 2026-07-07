@@ -126,12 +126,37 @@ a URL, tap a single play button, and pocket the phone.
   ~26-minute loop stays well under a second — nothing here needs fast or
   frequent reaction.
 - **Fix, in `sync-engine.js`:** poll interval raised to 10s; `SOFT` (start
-  nudging `playbackRate`) raised to 70ms; `HARD` (reseek) raised to 1s; a hard
-  reseek now requires **two consecutive** over-threshold reads before firing,
-  to filter one-off measurement glitches (e.g. a check landing right on the
-  loop seam) rather than reacting to a single noisy sample. Net effect:
-  corrections should now fire rarely if ever during normal playback, instead
-  of on nearly every 2s tick.
+  nudging `playbackRate`) raised to 70ms; `HARD` (act on persistent drift)
+  raised to 1s; acting on HARD drift now requires **two consecutive**
+  over-threshold reads, to filter one-off measurement glitches (e.g. a check
+  landing right on the loop seam) rather than reacting to a single noisy
+  sample.
+- **Update 2026-07-07: even with these looser thresholds, real-device testing
+  (iOS) still showed 3-5 interruptions/minute.** Any HARD-level correction was
+  still cutting via `audio.currentTime = targetPos()`, and a hard reseek is
+  audibly a splice regardless of how rarely it fires — the remaining
+  interruptions were exactly these reseeks. The fix needed to change what a
+  HARD correction *does*, not just how often it happens.
+
+## "Vinyl touch" correction — no reseek, no cut
+
+- Persistent HARD-level drift (two consecutive reads past 1s) no longer
+  reseeks. Instead `vinylTouch()` bends `playbackRate` away from 1x and eases
+  back over `TOUCH_S` = 1 second, shaped as a half-sine so the rate is
+  *exactly* 1x at both the start and end of the bend — there is no
+  discontinuity to hear, by construction, unlike a reseek which always is one.
+  Modeled on a DJ nudging a turntable back into phase rather than a jump-cut.
+- The bend's peak deviation scales with how far off we are (`Math.abs(drift) *
+  π / (2·TOUCH_S)`), clamped to `TOUCH_MIN_DEV`/`TOUCH_MAX_DEV` (±5%..±50%
+  playbackRate) — barely-there near the threshold, a real pitch-bend for a
+  bigger gap. If one bend doesn't fully close a large gap (clamped at 50%), the
+  residual just gets picked up by the next check, either another bend or
+  routine soft nudging.
+- `RESEEK_SANITY_S` (6s) is the one remaining fallback to an instant reseek:
+  a gap that large can't plausibly be closed by any tasteful bend (this is the
+  scenario for e.g. minutes of background-throttled JS after a long lock), so
+  it isn't worth trying — a rare, expected cut in an edge case that shouldn't
+  come up during normal listening.
 - Not yet confirmed on a real locked iPhone as of 2026-07-07 — this is the
   next thing to test.
 

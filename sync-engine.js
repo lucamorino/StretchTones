@@ -114,37 +114,69 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
     }
   }
 
-  // --- gentle convergence: nudge playbackRate, hard re-seek only on big, PERSISTENT gaps ---
+  // --- gentle convergence: nudge playbackRate; bend back into phase instead of cutting ---
   // Thresholds and polling are deliberately loose. The design tolerates 50-100ms of
   // drift ACROSS devices, so there is no reason to correct a single device's own
-  // jitter below that. A tight 2s/30ms/250ms setup was the actual cause of audible
-  // interruptions: audio.currentTime reads carry tens of ms of JS-timer scheduling
-  // jitter on mobile, which alone was crossing those thresholds on nearly every
-  // tick — triggering a playbackRate change or hard reseek (both audible on iOS)
-  // even with zero real clock drift. A modern phone's audio clock drifts only a
-  // few ms per minute, so real drift over the whole ~26-minute loop stays well
-  // under a second — there is no need to react quickly or often.
+  // jitter below that. A modern phone's audio clock drifts only a few ms per minute,
+  // so real accumulated drift over the whole ~26-minute loop stays well under a
+  // second — there is no need to react quickly or often.
   const CHECK_MS = 10000;            // ms between checks
   const SOFT = 0.070, HARD = 1.0;    // seconds — comfortably above single-device measurement jitter
-  const RATE_CLAMP = 0.02;           // max ±2% playbackRate nudge
+  const RATE_CLAMP = 0.02;           // max ±2% routine playbackRate nudge
+
+  // For persistent HARD-level drift, a "vinyl touch" instead of a reseek: like a DJ
+  // nudging a turntable, playbackRate bends away from 1x and eases back over TOUCH_S
+  // seconds — a shaped half-sine so it starts and ends at exactly 1x, i.e. no
+  // discontinuity, ever. Depth scales with how far off we are: barely audible near
+  // the threshold, a real pitch-bend for a bigger gap. A hard reseek (audible cut)
+  // is a last resort, reserved for gaps too large for any plausible bend to close
+  // (e.g. minutes of background throttling after the phone was locked a long time).
+  const TOUCH_S = 1.0;                // duration of one "touch"
+  const TOUCH_MIN_DEV = 0.05, TOUCH_MAX_DEV = 0.5; // playbackRate deviation range (±5%..±50%)
+  const RESEEK_SANITY_S = 6.0;        // beyond this, bending can't plausibly catch up — just cut
   let overHardStreak = 0;
+  let touchTimer = null;
+  let touching = false;
+
+  function vinylTouch(drift) {
+    touching = true;
+    clearInterval(touchTimer);
+    // average rate deviation needed to close `drift` seconds over TOUCH_S, for a
+    // half-sine bump (whose average is peak * 2/pi over the half period)
+    const needed = Math.abs(drift) * Math.PI / (2 * TOUCH_S);
+    const peak = Math.sign(-drift) * Math.min(Math.max(needed, TOUCH_MIN_DEV), TOUCH_MAX_DEV);
+    const t0 = performance.now();
+    touchTimer = setInterval(() => {
+      const t = (performance.now() - t0) / 1000;
+      if (t >= TOUCH_S || audio.paused) {
+        audio.playbackRate = 1;
+        touching = false;
+        clearInterval(touchTimer);
+        return;
+      }
+      audio.playbackRate = 1 + peak * Math.sin(Math.PI * t / TOUCH_S);
+    }, 50);
+  }
+
   function startDrift() {
     clearInterval(driftTimer);
+    clearInterval(touchTimer);
     overHardStreak = 0;
+    touching = false;
     driftTimer = setInterval(() => {
-      if (audio.paused || !loopLen()) return;
+      if (audio.paused || !loopLen() || touching) return;
       const D = loopLen();
       let drift = audio.currentTime - targetPos();      // + means we are ahead
       if (drift >  D / 2) drift -= D;                    // choose nearest across the loop seam
       if (drift < -D / 2) drift += D;
 
       if (Math.abs(drift) > HARD) {
-        // require two consecutive over-threshold reads before reseeking — filters
+        // require two consecutive over-threshold reads before acting — filters
         // one-off measurement glitches (e.g. a check landing right on the loop seam)
         if (++overHardStreak >= 2) {
-          audio.currentTime = targetPos();
-          audio.playbackRate = 1;
           overHardStreak = 0;
+          if (Math.abs(drift) > RESEEK_SANITY_S) { audio.currentTime = targetPos(); audio.playbackRate = 1; }
+          else vinylTouch(drift);
         }
       } else {
         overHardStreak = 0;
