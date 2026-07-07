@@ -47,12 +47,8 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
   //   ?synclog=1  — console.debug every correction with a timestamp, for correlating
   //                 against what you hear (open Safari's remote Web Inspector: connect
   //                 the iPhone to a Mac, then Safari > Develop > [device] > this page)
-  //   ?nocache=1  — bypass the HTTP cache and force a real fresh download, so the
-  //                 progress UI is exercised for real instead of resolving instantly
-  //                 from a previous test's cached response
   const noSync = params.has('nosync');
   const syncLog = params.has('synclog');
-  const noCache = params.has('nocache');
   function logCorrection(type, drift, extra = '') {
     if (syncLog) console.debug(`[sync] ${new Date().toISOString()} ${type} drift=${drift.toFixed(3)}s ${extra}`);
   }
@@ -68,7 +64,7 @@ export function createPlayer({ channels, duration = null, timeUrl = null, title 
   async function fetchWholeFile() {
     for (;;) {
       try {
-        const res = await fetch(url, { cache: noCache ? 'no-store' : 'force-cache' });
+        const res = await fetch(url, { cache: 'no-store' }); // always fetch fresh — no HTTP cache reuse across reloads
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const total = Number(res.headers.get('content-length')) || 0;
         const declaredType = res.headers.get('content-type') || '';
